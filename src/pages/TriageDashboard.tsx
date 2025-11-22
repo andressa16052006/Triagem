@@ -3,16 +3,24 @@ import { useNavigate } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Activity, LogOut, Plus, User } from "lucide-react";
+import { Activity, LogOut, Plus, User, Filter, UserCheck } from "lucide-react";
 import { toast } from "sonner";
+import { PatientDetailsDialog } from "@/components/PatientDetailsDialog";
+import { Footer } from "@/components/Footer";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Breadcrumb, BreadcrumbList, BreadcrumbItem, BreadcrumbLink, BreadcrumbSeparator, BreadcrumbPage } from "@/components/ui/breadcrumb";
+import { Badge } from "@/components/ui/badge";
+import { TextToSpeechButton } from "@/components/TextToSpeechButton";
 
 type TriageRecord = {
   id: string;
   patient_name: string;
+  patient_cpf: string;
   classification: string;
   status: string;
   created_at: string;
   wait_time_minutes: number;
+  is_recurring?: boolean;
 };
 
 const TriageDashboard = () => {
@@ -20,11 +28,13 @@ const TriageDashboard = () => {
   const [loading, setLoading] = useState(true);
   const [profile, setProfile] = useState<any>(null);
   const [records, setRecords] = useState<TriageRecord[]>([]);
+  const [selectedPatient, setSelectedPatient] = useState<any>(null);
+  const [filterBy, setFilterBy] = useState<string>("created_at");
 
   useEffect(() => {
     checkAuth();
     fetchRecords();
-  }, []);
+  }, [filterBy]);
 
   const checkAuth = async () => {
     const { data: { session } } = await supabase.auth.getSession();
@@ -50,17 +60,86 @@ const TriageDashboard = () => {
   };
 
   const fetchRecords = async () => {
-    const { data, error } = await supabase
-      .from("triage_records")
-      .select("*")
-      .order("created_at", { ascending: false });
+    let query = supabase.from("triage_records").select("*");
 
-    if (error) {
-      toast.error("Erro ao carregar triagens");
-      return;
+    // Apply sorting based on filter
+    if (filterBy === "severity") {
+      const { data, error } = await query;
+      if (error) {
+        toast.error("Erro ao carregar triagens");
+        return;
+      }
+      // Sort by severity manually
+      const severityOrder = { red: 0, orange: 1, yellow: 2, green: 3, blue: 4 };
+      const sorted = (data || []).sort((a, b) => 
+        (severityOrder[a.classification as keyof typeof severityOrder] || 5) - 
+        (severityOrder[b.classification as keyof typeof severityOrder] || 5)
+      );
+      
+      // Check if patients are recurring
+      const recordsWithHistory = await Promise.all(
+        sorted.map(async (record) => {
+          const { count } = await supabase
+            .from("triage_records")
+            .select("*", { count: "exact", head: true })
+            .eq("patient_cpf", record.patient_cpf)
+            .neq("id", record.id);
+          
+          return { ...record, is_recurring: (count || 0) > 0 };
+        })
+      );
+      
+      setRecords(recordsWithHistory);
+    } else if (filterBy === "age") {
+      const { data, error } = await query;
+      if (error) {
+        toast.error("Erro ao carregar triagens");
+        return;
+      }
+      // Sort by age (calculated from birth date)
+      const sorted = (data || []).sort((a, b) => {
+        const ageA = new Date().getFullYear() - new Date(a.patient_birth_date).getFullYear();
+        const ageB = new Date().getFullYear() - new Date(b.patient_birth_date).getFullYear();
+        return ageB - ageA; // Older first
+      });
+      
+      // Check if patients are recurring
+      const recordsWithHistory = await Promise.all(
+        sorted.map(async (record) => {
+          const { count } = await supabase
+            .from("triage_records")
+            .select("*", { count: "exact", head: true })
+            .eq("patient_cpf", record.patient_cpf)
+            .neq("id", record.id);
+          
+          return { ...record, is_recurring: (count || 0) > 0 };
+        })
+      );
+      
+      setRecords(recordsWithHistory);
+    } else {
+      // Default: sort by created_at
+      const { data, error } = await query.order("created_at", { ascending: false });
+      if (error) {
+        toast.error("Erro ao carregar triagens");
+        return;
+      }
+      
+      // Check if patients are recurring
+      const recordsWithHistory = await Promise.all(
+        (data || []).map(async (record) => {
+          const { count } = await supabase
+            .from("triage_records")
+            .select("*", { count: "exact", head: true })
+            .eq("patient_cpf", record.patient_cpf)
+            .neq("id", record.id);
+          
+          return { ...record, is_recurring: (count || 0) > 0 };
+        })
+      );
+      
+      setRecords(recordsWithHistory);
     }
-
-    setRecords(data || []);
   };
 
   const handleLogout = async () => {
@@ -95,6 +174,7 @@ const TriageDashboard = () => {
       waiting: "Aguardando",
       in_care: "Em Atendimento",
       completed: "Concluído",
+      pending_recheck: "Aguardando Reavaliação",
     };
     return labels[status as keyof typeof labels] || status;
   };
@@ -108,7 +188,8 @@ const TriageDashboard = () => {
   }
 
   return (
-    <div className="min-h-screen bg-background">
+    <div className="min-h-screen bg-background flex flex-col">
+      <TextToSpeechButton />
       {/* Header */}
       <header className="bg-card border-b border-border sticky top-0 z-10 shadow-sm">
         <div className="container mx-auto px-4 py-4 flex items-center justify-between">
@@ -133,13 +214,39 @@ const TriageDashboard = () => {
       </header>
 
       {/* Main Content */}
-      <main className="container mx-auto px-4 py-8">
-        <div className="flex justify-between items-center mb-6">
+      <main className="container mx-auto px-4 py-8 flex-1">
+        {/* Breadcrumb */}
+        <Breadcrumb className="mb-6">
+          <BreadcrumbList>
+            <BreadcrumbItem>
+              <BreadcrumbLink href="/triage-dashboard">Dashboard</BreadcrumbLink>
+            </BreadcrumbItem>
+            <BreadcrumbSeparator />
+            <BreadcrumbItem>
+              <BreadcrumbPage>Pacientes em Triagem</BreadcrumbPage>
+            </BreadcrumbItem>
+          </BreadcrumbList>
+        </Breadcrumb>
+
+        <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 mb-6">
           <h2 className="text-3xl font-bold">Pacientes em Triagem</h2>
-          <Button onClick={() => navigate("/triage")} size="lg">
-            <Plus className="h-5 w-5 mr-2" />
-            Nova Triagem
-          </Button>
+          <div className="flex gap-3 w-full sm:w-auto">
+            <Select value={filterBy} onValueChange={setFilterBy}>
+              <SelectTrigger className="w-[200px]">
+                <Filter className="h-4 w-4 mr-2" />
+                <SelectValue placeholder="Ordenar por" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="created_at">Mais Recentes</SelectItem>
+                <SelectItem value="severity">Gravidade</SelectItem>
+                <SelectItem value="age">Idade (Maior)</SelectItem>
+              </SelectContent>
+            </Select>
+            <Button onClick={() => navigate("/triage")} size="lg">
+              <Plus className="h-5 w-5 mr-2" />
+              Nova Triagem
+            </Button>
+          </div>
         </div>
 
         {/* Records Grid */}
@@ -152,10 +259,29 @@ const TriageDashboard = () => {
             </Card>
           ) : (
             records.map((record) => (
-              <Card key={record.id} className="hover:shadow-md transition-shadow">
+              <Card 
+                key={record.id} 
+                className="hover:shadow-md transition-shadow cursor-pointer"
+                onClick={async () => {
+                  const { data } = await supabase
+                    .from("triage_records")
+                    .select("*")
+                    .eq("id", record.id)
+                    .single();
+                  setSelectedPatient(data);
+                }}
+              >
                 <CardHeader className="pb-3">
                   <div className="flex items-center justify-between">
-                    <CardTitle className="text-lg">{record.patient_name}</CardTitle>
+                    <div className="flex items-center gap-2">
+                      <CardTitle className="text-lg">{record.patient_name}</CardTitle>
+                      {record.is_recurring && (
+                        <Badge variant="secondary" className="flex items-center gap-1">
+                          <UserCheck className="h-3 w-3" />
+                          Recorrente
+                        </Badge>
+                      )}
+                    </div>
                     <div className="flex items-center gap-2">
                       <span
                         className={`px-3 py-1 rounded-full text-white text-sm font-medium ${getClassificationColor(
@@ -185,6 +311,15 @@ const TriageDashboard = () => {
           )}
         </div>
       </main>
+
+      <PatientDetailsDialog 
+        patient={selectedPatient} 
+        open={!!selectedPatient} 
+        onOpenChange={(open) => !open && setSelectedPatient(null)}
+        onStatusUpdate={fetchRecords}
+      />
+
+      <Footer />
     </div>
   );
 };
